@@ -28,14 +28,19 @@ _face_app: Optional[FaceAnalysis] = None
 
 
 # ============================================
-# 模型加载：SCRFD + AdaFace
+# 模型加载：SCRFD + AdaFace（仅此处需要锁）
 # ============================================
 def get_face_app() -> FaceAnalysis:
     global _face_app
+
+    # 双重检查：避免锁竞争 & 保证线程安全
     if _face_app is None:
-        app = FaceAnalysis(name="antelopev2")
-        app.prepare(ctx_id=0, det_size=(640, 640))
-        _face_app = app
+        with lock:
+            if _face_app is None:  # 再次检查
+                app = FaceAnalysis(name="antelopev2")
+                app.prepare(ctx_id=0, det_size=(640, 640))
+                _face_app = app
+
     return _face_app
 
 
@@ -113,46 +118,45 @@ def read_image(
 
 
 # ============================================
-# 核心：提取人脸特征向量
+# 核心：提取人脸特征向量（不加锁 → 支持高并发）
 # ============================================
 def perform_represent(params: RepresentParams, file_bytes: Optional[bytes]):
-    with lock:
-        try:
-            img, scale = read_image(params.img, file_bytes, params.image_max_size)
-        except Exception as exc:
-            return {"detail": str(exc)}, 400
+    try:
+        img, scale = read_image(params.img, file_bytes, params.image_max_size)
+    except Exception as exc:
+        return {"detail": str(exc)}, 400
 
-        app = get_face_app()
-        faces = app.get(img)
+    app = get_face_app()
+    faces = app.get(img)
 
-        if not faces:
-            if params.enforce_detection:
-                return {"detail": "未检测到人脸"}, 400
-            return {
-                "results": [],
-                "scale": scale,
-                "detector": "SCRFD",
-                "model": "AdaFace",
-            }, 200
-
-        # 置信度排序
-        faces_sorted = sorted(faces, key=lambda f: float(f.det_score), reverse=True)
-
-        results = []
-        for idx, face in enumerate(faces_sorted[: params.max_faces]):
-            results.append({
-                "embedding": face.normed_embedding.tolist(),
-                "bbox": [int(x) for x in face.bbox],
-                "score": float(face.det_score),
-                "face_index": idx,
-            })
-
+    if not faces:
+        if params.enforce_detection:
+            return {"detail": "未检测到人脸"}, 400
         return {
-            "results": results,
+            "results": [],
             "scale": scale,
             "detector": "SCRFD",
             "model": "AdaFace",
         }, 200
+
+    # 置信度排序
+    faces_sorted = sorted(faces, key=lambda f: float(f.det_score), reverse=True)
+
+    results = []
+    for idx, face in enumerate(faces_sorted[: params.max_faces]):
+        results.append({
+            "embedding": face.normed_embedding.tolist(),
+            "bbox": [int(x) for x in face.bbox],
+            "score": float(face.det_score),
+            "face_index": idx,
+        })
+
+    return {
+        "results": results,
+        "scale": scale,
+        "detector": "SCRFD",
+        "model": "AdaFace",
+    }, 200
 
 
 # ============================================
