@@ -1,191 +1,197 @@
-# built-in dependencies
 import threading
-from typing import Any, Dict, Optional, Tuple
+from typing import Optional, Tuple, List
 
-"""
-核心人脸特征接口说明
-- 路由前缀：/v2，标签 deepface
-- POST /represent：上传图片或提供 Base64/路径/URL 提取人脸向量；
-  支持 detector_backend、model_name、enforce_detection、align、anti_spoofing、
-  image_max_size（超限等比缩放）、max_faces 等参数。
-输入形式：
-- multipart/form-data：表单字段名 img 上传文件
-- application/json：字段 img 传 Base64/文件路径/URL，其余参数同上
-返回：
-- 提取结果字典；若为 dict，附加 scale（缩放比例）、detector_backend、model_name。
-错误：
-- 参数校验失败返回 422；未提供图片或处理异常返回 400（detail 为错误信息）。
-"""
-
+import base64
 import cv2
 import numpy as np
-# project dependencies
-from deepface.api.src.modules.core import service
-from deepface.commons.image_utils import load_image
-from deepface.commons.logger import Logger
-# 3rd party dependencies
-from fastapi import APIRouter, Body, File, HTTPException, Request, UploadFile
-from pydantic import BaseModel, Field, ValidationError
+import requests
+from fastapi import (
+    APIRouter,
+    UploadFile,
+    File,
+    Form,
+    Request,
+    HTTPException
+)
+from pydantic import BaseModel, Field
+from insightface.app import FaceAnalysis
 
-logger = Logger()
-router = APIRouter(prefix="/v2", tags=["deepface"])
 
-# 设置最大图片尺寸
+# ============================================
+# 路由初始化
+# ============================================
+router = APIRouter(prefix="/v2", tags=["人脸特征向量接口"])
+
 default_image_max_size = 640
-
-# 创建全局锁保证底层模型线程安全
 lock = threading.Lock()
+_face_app: Optional[FaceAnalysis] = None
 
 
+# ============================================
+# 模型加载：SCRFD + AdaFace
+# ============================================
+def get_face_app() -> FaceAnalysis:
+    global _face_app
+    if _face_app is None:
+        app = FaceAnalysis(name="antelopev2")
+        app.prepare(ctx_id=0, det_size=(640, 640))
+        _face_app = app
+    return _face_app
+
+
+# ============================================
+# 工具：缩放图片
+# ============================================
+def resize_image(img: np.ndarray, max_size: int) -> Tuple[np.ndarray, float]:
+    h, w = img.shape[:2]
+    if max(h, w) <= max_size:
+        return img, 1.0
+
+    scale = max_size / max(h, w)
+    new_w = int(w * scale)
+    new_h = int(h * scale)
+    return cv2.resize(img, (new_w, new_h)), scale
+
+
+# ============================================
+# 工具：从字符串加载图片
+# ============================================
+def load_image_from_str(img_value: str) -> Optional[np.ndarray]:
+    img_value = img_value.strip()
+
+    # URL
+    if img_value.startswith("http://") or img_value.startswith("https://"):
+        resp = requests.get(img_value, timeout=5)
+        arr = np.frombuffer(resp.content, np.uint8)
+        return cv2.imdecode(arr, cv2.IMREAD_COLOR)
+
+    # Base64
+    if "base64," in img_value or len(img_value) > 200:
+        if "base64," in img_value:
+            img_value = img_value.split("base64,", 1)[1]
+        data = base64.b64decode(img_value)
+        arr = np.frombuffer(data, np.uint8)
+        return cv2.imdecode(arr, cv2.IMREAD_COLOR)
+
+    # 本地路径
+    return cv2.imread(img_value)
+
+
+# ============================================
+# 入参
+# ============================================
 class RepresentParams(BaseModel):
     img: Optional[str] = Field(
-        None,
-        description="非上传文件时的图像输入：Base64、文件路径或 URL。",
+        default=None,
+        description="可选：Base64 / URL / 本地路径；若使用文件上传可为空"
     )
-    image_max_size: int = Field(
-        default_image_max_size,
-        ge=1,
-        description="处理后图像的最大宽高，超过时按长边等比缩放。",
-    )
-    detector_backend: str = Field("yunet", description="人脸检测后端，如 yunet、opencv。")
-    model_name: str = Field("ArcFace", description="DeepFace 模型名称，默认 ArcFace。")
-    enforce_detection: bool = Field(True, description="未检测到人脸时是否抛错。")
-    align: bool = Field(True, description="提取向量前是否对人脸进行对齐。")
-    anti_spoofing: bool = Field(False, description="是否启用防伪检测。")
-    max_faces: int = Field(1, ge=1, description="最大处理人脸数量。")
+    image_max_size: int = Field(default=default_image_max_size)
+    enforce_detection: bool = Field(default=True)
+    max_faces: int = Field(default=1, ge=1)
 
 
-def _model_name(value: Optional[str]) -> str:
-    return (value or "ArcFace")
+# ============================================
+# 读取图片（同步函数！不能是 async）
+# ============================================
+def read_image(
+    img_value: Optional[str],
+    file_bytes: Optional[bytes],
+    max_size: int
+):
+    img: Optional[np.ndarray] = None
 
-
-def imageCode(image: np.ndarray, image_max_size: int) -> Tuple[np.ndarray, float]:
-    height, width = image.shape[:2]
-    if height <= image_max_size and width <= image_max_size:
-        return image, 1
-
-    scale = image_max_size / width if width > height else image_max_size / height
-    new_width = int(width * scale)
-    new_height = int(height * scale)
-
-    image = cv2.resize(image, (new_width, new_height))
-    return image, scale
-
-
-async def _coerce_payload(
-    request: Request,
-    payload: Optional[BaseModel],
-    file: Optional[UploadFile],
-    model_cls,
-) -> Tuple[BaseModel, Optional[bytes]]:
-    """
-    同时支持 JSON 与 multipart/form-data。
-    - JSON 直接由 payload 解析
-    - 表单上传兼容旧版 Flask 的字段解析方式
-    """
-    file_bytes = await file.read() if file else None
-
-    if payload is not None:
-        return payload, file_bytes
-
-    content_type = request.headers.get("content-type", "")
-    data: Dict[str, Any] = {}
-
-    if "multipart/form-data" in content_type:
-        form = await request.form()
-        for key, value in form.items():
-            if isinstance(value, UploadFile) and key == "img" and file is None:
-                file = value
-            else:
-                data[key] = value
-        if file_bytes is None and isinstance(file, UploadFile):
-            file_bytes = await file.read()
-    else:
-        try:
-            data = await request.json()
-        except Exception:
-            data = {}
-
-    try:
-        params = model_cls.model_validate(data)
-    except ValidationError as exc:
-        raise HTTPException(status_code=422, detail=exc.errors())
-
-    return params, file_bytes
-
-
-def _extract_image(
-    img_value: Optional[str], file_bytes: Optional[bytes], image_max_size: int
-) -> Tuple[np.ndarray, float]:
     if file_bytes:
-        image_array = np.frombuffer(file_bytes, dtype=np.uint8)
-        img, scale = imageCode(cv2.imdecode(image_array, cv2.IMREAD_COLOR), image_max_size)
-        if img is None:
-            raise ValueError("上传的图片无效或为空。")
-        return img, scale
+        arr = np.frombuffer(file_bytes, np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    elif img_value:
+        img = load_image_from_str(img_value)
 
-    if img_value:
-        buf, _ = load_image(img_value)
-        img, scale = imageCode(buf, image_max_size)
-        if img is None:
-            raise ValueError("图片未检测到人脸。")
-        return img, scale
+    if img is None:
+        raise ValueError("未提供有效图片，请上传 img_file 或提供 Base64/URL/路径")
 
-    raise ValueError("未提供图片，请通过文件字段 img 或字段 img 的 Base64/路径/URL 传入。")
+    return resize_image(img, max_size)
 
 
+# ============================================
+# 核心：提取人脸特征向量
+# ============================================
 def perform_represent(params: RepresentParams, file_bytes: Optional[bytes]):
     with lock:
-        img, scale = _extract_image(params.img, file_bytes, params.image_max_size)
+        try:
+            img, scale = read_image(params.img, file_bytes, params.image_max_size)
+        except Exception as exc:
+            return {"detail": str(exc)}, 400
 
-        obj = service.represent(
-            img_path=img,
-            model_name=_model_name(params.model_name),
-            detector_backend=params.detector_backend,
-            enforce_detection=bool(params.enforce_detection),
-            align=bool(params.align),
-            anti_spoofing=bool(params.anti_spoofing),
-            max_faces=int(params.max_faces),
-        )
+        app = get_face_app()
+        faces = app.get(img)
 
-        logger.debug(obj)
+        if not faces:
+            if params.enforce_detection:
+                return {"detail": "未检测到人脸"}, 400
+            return {
+                "results": [],
+                "scale": scale,
+                "detector": "SCRFD",
+                "model": "AdaFace",
+            }, 200
 
-        # 补充上下文字段，保持与原有输出兼容
-        if not isinstance(obj, tuple):
-            obj["scale"] = scale
-            obj["detector_backend"] = params.detector_backend
-            obj["model_name"] = _model_name(params.model_name)
+        # 置信度排序
+        faces_sorted = sorted(faces, key=lambda f: float(f.det_score), reverse=True)
 
-        return obj, 200
+        results = []
+        for idx, face in enumerate(faces_sorted[: params.max_faces]):
+            results.append({
+                "embedding": face.normed_embedding.tolist(),
+                "bbox": [int(x) for x in face.bbox],
+                "score": float(face.det_score),
+                "face_index": idx,
+            })
+
+        return {
+            "results": results,
+            "scale": scale,
+            "detector": "SCRFD",
+            "model": "AdaFace",
+        }, 200
 
 
+# ============================================
+# API：/v2/represent
+# ============================================
 @router.post(
     "/represent",
-    summary="生成人脸向量",
-    description="支持 multipart/form-data 或 JSON。表单字段 'img' 上传文件，或在 JSON/表单字段 'img' 传 Base64/路径/URL。",
+    summary="【人脸特征向量提取】",
+    description=(
+        "使用 SCRFD + AdaFace 提取 512 维人脸向量。\n"
+        "适用于监控、模糊、偏角、光照不稳定等真实场景。\n"
+        "支持：文件上传 + Base64 + URL + 本地路径。"
+    )
 )
 async def represent(
     request: Request,
-    payload: Optional[RepresentParams] = Body(
-        None, description="非表单上传时的 JSON 负载。"
+
+    img: Optional[str] = Form(default=None),
+    img_file: Optional[UploadFile] = File(
+        default=None,
+        description="上传图片文件（推荐）"
     ),
-    img: Optional[UploadFile] = File(None, description="表单字段 'img' 上传的图片文件。"),
+
+    image_max_size: int = Form(default_image_max_size),
+    enforce_detection: bool = Form(True),
+    max_faces: int = Form(1),
 ):
-    params, file_bytes = await _coerce_payload(request, payload, img, RepresentParams)
-    if params.img is None and file_bytes is None:
-        raise HTTPException(
-            status_code=400,
-            detail="请通过文件字段 img 上传图片，或在字段 img 中提供 Base64/路径/URL。",
-        )
+    file_bytes = await img_file.read() if img_file else None
 
-    try:
-        result, status_code = perform_represent(params, file_bytes)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+    params = RepresentParams(
+        img=img,
+        image_max_size=image_max_size,
+        enforce_detection=enforce_detection,
+        max_faces=max_faces,
+    )
 
-    if status_code != 200:
-        raise HTTPException(status_code=status_code, detail=result)
+    result, code = perform_represent(params, file_bytes)
+
+    if code != 200:
+        raise HTTPException(status_code=code, detail=result)
 
     return result
