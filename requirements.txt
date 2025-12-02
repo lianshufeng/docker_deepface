@@ -1,0 +1,14 @@
+# python 3.11
+
+deepface==0.0.93
+# tensorflow 2.17 supports py3.11 and works with deepface; tf-keras is bundled
+tensorflow==2.17.0
+
+
+# align with .env es_version=8.17.0
+elasticsearch==8.17.0
+
+# FastAPI stack for serving APIs
+fastapi==0.115.5
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9
