@@ -15,9 +15,6 @@ from fastapi import (
 # External libs
 from elasticsearch import Elasticsearch, NotFoundError
 
-# Internal
-from deepface.commons.logger import Logger
-from onnxruntime.capi.onnxruntime_pybind11_state import RuntimeException
 
 from .routes import (
     perform_represent,
@@ -25,7 +22,16 @@ from .routes import (
     default_image_max_size,
 )
 
-logger = Logger()
+# 替代 logger
+class SimpleLogger:
+    def info(self, msg):
+        print("[INFO]", msg)
+
+logger = SimpleLogger()
+
+# 替代 RuntimeException
+RuntimeException = RuntimeError
+
 router = APIRouter(prefix="/store", tags=["store"])
 
 # ============
@@ -36,7 +42,6 @@ es_client = {}
 INDEX_PREFIX = "faces"
 
 _model_name: str = "AdaFace"
-
 
 # ============
 # ES Utilities
@@ -123,7 +128,7 @@ async def store_put(
     if params.img is None and file_bytes is None:
         raise HTTPException(400, "必须提供 img 或 img_file")
 
-    # 1) 取 embedding（调用 routes.py 新方法）
+    # 1) 取 embedding
     rep, code = perform_represent(params, file_bytes)
     if code != 200:
         raise HTTPException(code, rep)
@@ -191,8 +196,7 @@ async def store_delete(
 # ============
 
 @router.post("/clear", summary="清空索引（删除全部向量）")
-async def store_clear(
-):
+async def store_clear():
     idx = index_name(_model_name)
     es = get_es(_model_name, 512)
 
@@ -207,8 +211,7 @@ async def store_clear(
 # ============
 
 @router.post("/size", summary="索引向量数量")
-async def store_size(
-):
+async def store_size():
     idx = index_name(_model_name)
     es = get_es(_model_name, 512)
 
