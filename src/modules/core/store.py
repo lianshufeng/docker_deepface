@@ -15,17 +15,18 @@ from fastapi import (
 # External libs
 from elasticsearch import Elasticsearch, NotFoundError
 
-
 from .routes import (
     perform_represent,
     RepresentParams,
     default_image_max_size,
 )
 
+
 # 替代 logger
 class SimpleLogger:
     def info(self, msg):
         print("[INFO]", msg)
+
 
 logger = SimpleLogger()
 
@@ -38,10 +39,11 @@ router = APIRouter(prefix="/store", tags=["store"])
 # ES Client Cache
 # ============
 
-es_client = {}
+es_client = None  # 用于缓存客户端
 INDEX_PREFIX = "faces"
 
 _model_name: str = "AdaFace"
+
 
 # ============
 # ES Utilities
@@ -69,8 +71,11 @@ def create_es_client() -> Elasticsearch:
 def get_es(model_name: str, dims: int) -> Elasticsearch:
     """Get ES client and ensure index exists."""
     global es_client
-    if model_name in es_client:
-        return es_client[model_name]
+    if es_client is not None:
+        return es_client
+
+    # if model_name in es_client:
+    #     return es_client[model_name]
 
     client = create_es_client()
 
@@ -99,7 +104,7 @@ def get_es(model_name: str, dims: int) -> Elasticsearch:
             },
         )
 
-    es_client[model_name] = client
+    es_client = client
     return client
 
 
