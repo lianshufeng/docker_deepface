@@ -6,6 +6,14 @@ FROM python:3.11-bullseye
 #    git zip unzip wget curl htop gcc \
 #    && rm -rf /var/lib/apt/lists/*
 
+
+# 安装 OpenCV 运行所需的底层库
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        libgl1 \
+        libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /opt/app
 ADD ./src ./
 ADD ./requirements.txt ./requirements.txt

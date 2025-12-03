@@ -7,6 +7,7 @@ services:
       - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
       - ES_JAVA_OPTS=-Xms512m -Xmx1024m
       - xpack.security.enabled=false
+    restart: always
     volumes:
       - ${store}/data:/usr/share/elasticsearch/data
 #      - ${store}/ik:/usr/share/elasticsearch/plugins/ik
@@ -18,6 +19,7 @@ services:
   kibana:
     image: kibana:${es_version}
     container_name: kibana
+    restart: always
     environment:
       - ELASTICSEARCH_HOSTS=${ELASTICSEARCH_HOSTS}
     ports:
