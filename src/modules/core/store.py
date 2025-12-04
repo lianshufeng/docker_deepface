@@ -74,9 +74,6 @@ def get_es(model_name: str, dims: int) -> Elasticsearch:
     if es_client is not None:
         return es_client
 
-    # if model_name in es_client:
-    #     return es_client[model_name]
-
     client = create_es_client()
 
     if not client.ping():
@@ -99,6 +96,7 @@ def get_es(model_name: str, dims: int) -> Elasticsearch:
                             "similarity": "cosine",
                         },
                         "key": {"type": "keyword"},
+                        "extra": {"type": "text"}  # 新增扩展字段（任意长字符串）
                     }
                 }
             },
@@ -117,6 +115,7 @@ async def store_put(
         key: str = Form(..., description="唯一 key"),
         img: Optional[str] = Form(None),
         img_file: Optional[UploadFile] = File(None),
+        extra: Optional[str] = Form(None),
         image_max_size: int = Form(default_image_max_size, ge=1),
         max_faces: int = Form(1, ge=1),
 ):
@@ -154,6 +153,7 @@ async def store_put(
         document={
             "key": key,
             "face_vector": emb,
+            "extra": extra,
         },
     )
 
@@ -173,7 +173,7 @@ async def store_get(
 
     try:
         res = es.get(index=idx, id=key)
-        return res["_source"]
+        return res["_source"]  # 自动包含 extra
     except NotFoundError:
         raise HTTPException(404, f"未找到: {key}")
 
@@ -197,7 +197,7 @@ async def store_delete(
 
 
 # ============
-# CLEAR (删除索引)
+# CLEAR
 # ============
 
 @router.post("/clear", summary="清空索引（删除全部向量）")
@@ -212,7 +212,7 @@ async def store_clear():
 
 
 # ============
-# SIZE (统计)
+# SIZE
 # ============
 
 @router.post("/size", summary="索引向量数量")
@@ -274,7 +274,7 @@ async def store_search(
             "k": max_size,
             "num_candidates": 100
         },
-        "_source": ["key"],
+        "_source": ["key", "extra"],
     }
 
     t1 = time.time()
@@ -290,7 +290,11 @@ async def store_search(
             "search": time.time() - t1,
         },
         "items": [
-            {"key": hit["_source"]["key"], "score": hit["_score"]}
+            {
+                "key": hit["_source"]["key"],
+                "score": hit["_score"],
+                "extra": hit["_source"].get("extra"),
+            }
             for hit in res["hits"]["hits"]
         ]
     }
