@@ -19,9 +19,16 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and push
+      - name: Build and push cpu
         working-directory: ./
         run: |
           IMAGE_NAME=lianshufeng/deepface:latest
           docker build -f Dockerfile -t $IMAGE_NAME .
+          docker push $IMAGE_NAME
+      
+      - name: Build and push gpu
+        working-directory: ./
+        run: |
+          IMAGE_NAME=lianshufeng/deepface:gpu
+          docker build -f Dockerfile-gpu -t $IMAGE_NAME .
           docker push $IMAGE_NAME
