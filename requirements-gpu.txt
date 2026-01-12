@@ -1,0 +1,19 @@
+# python 3.11
+
+# --- Core Face Recognition ---
+insightface==0.7.3
+onnxruntime-gpu==1.17.1
+numpy==1.26.4
+opencv-python==4.9.0.80
+
+# --- FastAPI Server ---
+fastapi==0.115.5
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9
+pydantic==2.6.3
+
+# --- Elasticsearch ---
+elasticsearch===8.17.0
+
+# --- Utils ---
+requests==2.31.0

@@ -1,0 +1,20 @@
+services:
+  deepface:
+    image: lianshufeng/deepface:gpu
+    volumes:
+      - ./models/antelopev2:/root/.insightface/models/antelopev2
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - ELASTIC_PASSWORD=es7896@2025
+      - ELASTICSEARCH_HOSTS=http://host.docker.internal:9200
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
